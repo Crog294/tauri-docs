@@ -1,0 +1,98 @@
+---
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import ProjectContext from 'virtual:starlight/project-context';
+import { createSatteriMarkdownProcessor } from '@astrojs/markdown-satteri';
+import { Aside } from '@astrojs/starlight/components';
+
+// upstream sections shown by `reference/environment-variables.mdx`
+const placed = ["Tauri's Environment Variables", 'Tauri CLI', 'Tauri CLI Hook Commands'] as const;
+
+interface Props {
+  section: (typeof placed)[number];
+}
+
+const { section } = Astro.props;
+
+const file = path.join(
+  fileURLToPath(ProjectContext.root),
+  'packages/tauri/crates/tauri-cli/ENVIRONMENT_VARIABLES.md'
+);
+const text = await fs.readFile(file, 'utf-8').catch((cause) => {
+  throw new Error(
+    `Could not read ${file}. If the tauri submodule is missing, run \`pnpm dev:setup:submodules\``,
+    { cause }
+  );
+});
+
+const md = await createSatteriMarkdownProcessor({
+  mdastPlugins: [
+    {
+      name: 'environment-variables-section',
+      before(root, ctx) {
+        const nodes = root.children;
+        const isDefinition = (node: (typeof nodes)[number]) => node.type === 'definition';
+
+        const starts = nodes.flatMap((node, index) =>
+          node.type === 'heading' && node.depth === 3 ? [index] : []
+        );
+        // the parser turns straight quotes into curly ones
+        const titles = starts.map((index) =>
+          ctx.textContent(nodes[index]).replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+        );
+
+        if (!nodes.slice(0, starts[0]).every(isDefinition)) {
+          throw new Error(
+            `${file} has text before its first \`###\` heading that the environment variables page does not show. Update EnvironmentVariables.astro to place it`
+          );
+        }
+
+        // the page writes each heading itself to keep it in the table of contents
+        const unknown = titles.find((title) => !(placed as readonly string[]).includes(title));
+        if (unknown !== undefined) {
+          throw new Error(
+            `${file} has a "${unknown}" heading that the environment variables page does not show. Add it to the page and to the list in EnvironmentVariables.astro`
+          );
+        }
+
+        const at = titles.indexOf(section);
+        if (at === -1) {
+          throw new Error(`Could not find the "${section}" section in ${file}`);
+        }
+        const body = nodes
+          .slice(starts[at] + 1, starts[at + 1])
+          .filter((node) => !isDefinition(node));
+
+        // top-level quotes are renamed so they can be shown as asides
+        for (const node of body) {
+          if (node.type === 'blockquote') ctx.setField(node, 'data', { hName: 'aside-quote' });
+        }
+
+        ctx.setField(root, 'children', [...body, ...nodes.filter(isDefinition)]);
+      },
+      html(node) {
+        if (!node.value.startsWith('<!--')) {
+          throw new Error(
+            `The "${section}" section in ${file} has ${node.value} outside backticks, where the page would not display it. It has to be in a code span upstream`
+          );
+        }
+      },
+    },
+  ],
+});
+const { code } = await md.render(text);
+
+// quote contents land at the odd positions
+const parts = code.split(/<aside-quote>([\s\S]*?)<\/aside-quote>/);
+---
+
+{parts.map((html, index) =>
+  index % 2 === 1 ? (
+    <Aside type="tip">
+      <Fragment set:html={html} />
+    </Aside>
+  ) : (
+    <Fragment set:html={html} />
+  )
+)}
